@@ -80,28 +80,48 @@ export default function HomeScreen() {
   const [brandAccordion, setBrandAccordion] = useState(true);
   const [storeAccordion, setStoreAccordion] = useState(true);
   const [itemAccordion, setItemAccordion] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null); // New state for UX
+// Helper function to handle the polling logic
+  async function pollSearch(searchQuery: string) {
+    try {
+      const response = await searchProduct(searchQuery);
+
+      if (response.status === "COMPLETED") {
+        setData(response.results || []);
+        setLoading(false);
+        setStatusMessage(null);
+      } 
+      else if (response.status === "STARTED" || response.status === "PROCESSING") {
+        // Update message for the user
+        setStatusMessage(response.message || "Buscando mejores precios...");
+        
+        // Wait 3 seconds and poll again
+        setTimeout(() => pollSearch(searchQuery), 3000);
+      } 
+      else if (response.status === "EMPTY") {
+        setData([]);
+        setLoading(false);
+      }
+    } catch (err: any) {
+      setError(err.message || "Error de conexión");
+      setLoading(false);
+    }
+  }
 
   async function handleSearch() {
     if (query.length < 2) return;
 
     setLoading(true);
     setError(null);
+    setStatusMessage("Iniciando búsqueda...");
+    setData([]); // Clear old results while searching
+    
+    // Reset filters for new search
     setSelectedBrands([]);
     setSelectedStores([]);
     setSelectedItems([]);
 
-    try {
-      const response = await searchProduct(query);
-      if (response?.results) {
-        setData(response.results);
-      } else {
-        setData([]);
-      }
-    } catch {
-      setError("Error de conexión");
-    } finally {
-      setLoading(false);
-    }
+    await pollSearch(query);
   }
 
   /* ---------- Derived data ---------- */
@@ -187,7 +207,12 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {loading && <ActivityIndicator size="large" />}
+      {loading && (
+        <View style={styles.loaderContainer}>
+          <ActivityIndicator size="large" color="#000" />
+          <Text style={styles.statusMessage}>{statusMessage}</Text>
+        </View>
+      )}
       {error && <Text style={styles.error}>{error}</Text>}
 
       {/* Results */}
@@ -433,5 +458,16 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     alignItems: "center",
     marginTop: 12,
+  },
+
+  loaderContainer: {
+    marginVertical: 20,
+    alignItems: 'center',
+  },
+  
+  statusMessage: {
+    marginTop: 10,
+    color: '#666',
+    fontStyle: 'italic',
   },
 });
