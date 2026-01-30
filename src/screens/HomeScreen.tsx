@@ -1,61 +1,39 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
-  View,
-  Text,
-  TextInput,
-  FlatList,
-  ActivityIndicator,
-  StyleSheet,
-  TouchableOpacity,
-  Pressable,
-  Modal,
+  View, Text, TextInput, FlatList, ActivityIndicator, StyleSheet,
+  TouchableOpacity, Pressable, Modal, ScrollView, Alert
 } from "react-native";
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { searchProduct } from "../api/client";
+import HeartbeatLoader from "../components/Loader";
 
+/* ---------- Types ---------- */
 type Price = {
   store: string;
   product_name: string;
   brand: string;
   price: number;
   url: string;
+  promo_text?: string;
 };
 
-/* ---------- Small UI helpers ---------- */
+type CartItem = Price & { quantity: number };
 
-function Checkbox({
-  label,
-  checked,
-  onToggle,
-}: {
-  label: string;
-  checked: boolean;
-  onToggle: () => void;
-}) {
+/* ---------- Small UI helpers (Your Checkbox/Accordion) ---------- */
+function Checkbox({ label, checked, onToggle }: { label: string; checked: boolean; onToggle: () => void }) {
   return (
     <Pressable onPress={onToggle} style={styles.checkboxRow}>
-      <View
-        style={[
-          styles.checkbox,
-          checked && styles.checkboxChecked,
-        ]}
-      />
+      <View style={[styles.checkbox, checked && styles.checkboxChecked]} />
       <Text>{label}</Text>
     </Pressable>
   );
 }
 
-function Accordion({
-  title,
-  open,
-  onToggle,
-  children,
-}: any) {
+function Accordion({ title, open, onToggle, children }: any) {
   return (
     <View style={styles.accordion}>
       <Pressable onPress={onToggle}>
-        <Text style={styles.accordionTitle}>
-          {title} {open ? "▲" : "▼"}
-        </Text>
+        <Text style={styles.accordionTitle}>{title} {open ? "▲" : "▼"}</Text>
       </Pressable>
       {open && children}
     </View>
@@ -63,411 +41,387 @@ function Accordion({
 }
 
 /* ---------- Main Screen ---------- */
-
 export default function HomeScreen() {
   const [query, setQuery] = useState("");
   const [data, setData] = useState<Price[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  const [selectedStores, setSelectedStores] = useState<string[]>([]);
+  // --- List & Cart State ---
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [isListModalOpen, setIsListModalOpen] = useState(false);
+  const [listName, setListName] = useState("");
+
+  // --- Filter State ---
   const [selectedBrands, setSelectedBrands] = useState<string[]>([]);
+  const [selectedStores, setSelectedStores] = useState<string[]>([]);
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
-
   const [sortAsc, setSortAsc] = useState(true);
-
   const [filterOpen, setFilterOpen] = useState(false);
   const [brandAccordion, setBrandAccordion] = useState(true);
   const [storeAccordion, setStoreAccordion] = useState(true);
   const [itemAccordion, setItemAccordion] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null); // New state for UX
-// Helper function to handle the polling logic
-  async function pollSearch(searchQuery: string) {
-    try {
-      const response = await searchProduct(searchQuery);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [savedLists, setSavedLists] = useState<any[]>([]);
 
-      if (response.status === "COMPLETED") {
-        setData(response.results || []);
-        setLoading(false);
-        setStatusMessage(null);
-      } 
-      else if (response.status === "STARTED" || response.status === "PROCESSING") {
-        // Update message for the user
-        setStatusMessage(response.message || "Buscando mejores precios...");
-        
-        // Wait 3 seconds and poll again
-        setTimeout(() => pollSearch(searchQuery), 3000);
-      } 
-      else if (response.status === "EMPTY") {
-        setData([]);
-        setLoading(false);
+  /* ---------- Cart Logic ---------- */
+  const addToCart = (product: Price) => {
+    setCart(prev => {
+      const existing = prev.find(i => i.url === product.url);
+      if (existing) {
+        return prev.map(i => i.url === product.url ? { ...i, quantity: i.quantity + 1 } : i);
       }
-    } catch (err: any) {
+      return [...prev, { ...product, quantity: 1 }];
+    });
+  };
+
+  const removeFromCart = (url: string) => {
+    setCart(prev => prev.filter(i => i.url !== url));
+  };
+
+  const groupedCart = useMemo(() => {
+    return cart.reduce((acc, item) => {
+      if (!acc[item.store]) acc[item.store] = [];
+      acc[item.store].push(item);
+      return acc;
+    }, {} as Record<string, CartItem[]>);
+  }, [cart]);
+
+  const totalCartPrice = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+
+  const saveListToDevice = async () => {
+    if (!listName.trim()) return Alert.alert("Error", "Ponle un nombre a tu lista");
+    try {
+      const existingData = await AsyncStorage.getItem('@my_lists');
+      const prevLists = existingData ? JSON.parse(existingData) : [];
+      const newList = { id: Date.now().toString(), name: listName, items: cart, total: totalCartPrice, date: new Date().toLocaleDateString() };
+      await AsyncStorage.setItem('@my_lists', JSON.stringify([newList, ...prevLists]));
+      Alert.alert("Éxito", "Lista guardada");
+      setCart([]); setListName(""); setIsListModalOpen(false);
+    } catch (e) { Alert.alert("Error", "Error al guardar"); }
+  };
+
+  /* ---------- Polling Search Logic (Restored) ---------- */
+ // React Native HomeScreen
+async function pollSearch(searchQuery: string) {
+  try {
+    const response = await searchProduct(searchQuery);
+
+    if (response.status === "COMPLETED") {
+      setData(response.results || []);
+      setLoading(false);
+      setStatusMessage(null);
+    } 
+    else if (response.status === "STARTED" || response.status === "PROCESSING") {
+      setStatusMessage(response.message || "Buscando mejores precios...");
+      setTimeout(() => pollSearch(searchQuery), 4000); // Increased to 4s to be safer
+    }
+  } catch (err: any) {
+    // If we hit a rate limit, don't show a red error, just wait longer
+    if (err.message?.includes("Too many requests")) {
+      setStatusMessage("Servidor ocupado, reintentando en breve...");
+      setTimeout(() => pollSearch(searchQuery), 10000); // Wait 10s if rate limited
+    } else {
       setError(err.message || "Error de conexión");
       setLoading(false);
     }
   }
-
+}
   async function handleSearch() {
     if (query.length < 2) return;
-
-    setLoading(true);
-    setError(null);
-    setStatusMessage("Iniciando búsqueda...");
-    setData([]); // Clear old results while searching
-    
-    // Reset filters for new search
-    setSelectedBrands([]);
-    setSelectedStores([]);
-    setSelectedItems([]);
-
+    setLoading(true); setError(null); setStatusMessage("Iniciando búsqueda...");
+    setData([]); setSelectedBrands([]); setSelectedStores([]); setSelectedItems([]);
     await pollSearch(query);
+    setHasSearched(true);
   }
 
-  /* ---------- Derived data ---------- */
-
-  const storeFilter = useMemo(
-    () => Array.from(new Set(data.map(d => d.store))),
-    [data]
-  );
-
-  const brandFilter = useMemo(
-    () => Array.from(new Set(data.map(d => d.brand))),
-    [data]
-  );
-
-  const items = useMemo(
-    () =>
-      Array.from(
-        new Set(data.map(d => d.product_name.split(" ")[0]))
-      ),
-    [data]
-  );
+  /* ---------- Derived Data & Filters (Restored) ---------- */
+  const storeFilter = useMemo(() => Array.from(new Set(data.map(d => d.store))), [data]);
+  const brandFilter = useMemo(() => Array.from(new Set(data.map(d => d.brand))), [data]);
+  const itemsFilter = useMemo(() => Array.from(new Set(data.map(d => d.product_name.split(" ")[0]))), [data]);
 
   const filtered = useMemo(() => {
     let result = data.filter(p => {
-      const brandOk =
-        selectedBrands.length === 0 ||
-        selectedBrands.includes(p.store);
-
-      const itemOk =
-        selectedItems.length === 0 ||
-        selectedItems.some(i =>
-          p.product_name
-            .toLowerCase()
-            .includes(i.toLowerCase())
-        );
-
-      return brandOk && itemOk;
+      const brandOk = selectedBrands.length === 0 || selectedBrands.includes(p.brand);
+      const storeOk = selectedStores.length === 0 || selectedStores.includes(p.store);
+      const itemOk = selectedItems.length === 0 || selectedItems.some(i => p.product_name.toLowerCase().includes(i.toLowerCase()));
+      return brandOk && storeOk && itemOk;
     });
-
-    result.sort((a, b) =>
-      sortAsc ? a.price - b.price : b.price - a.price
-    );
-
+    result.sort((a, b) => sortAsc ? a.price - b.price : b.price - a.price);
     return result;
-  }, [data, selectedBrands, selectedItems, sortAsc]);
+  }, [data, selectedBrands, selectedStores, selectedItems, sortAsc]);
 
   const cheapestPrice = filtered[0]?.price;
 
-  /* ---------- UI ---------- */
+  const loadSavedLists = async () => {
+    try {
+      const data = await AsyncStorage.getItem('@my_lists');
+      if (data) setSavedLists(JSON.parse(data));
+      setIsHistoryOpen(true);
+    } catch (e) {
+      Alert.alert("Error", "No se pudieron cargar las listas");
+    }
+  };
+
+  const deleteList = async (id: string) => {
+    const updated = savedLists.filter(l => l.id !== id);
+    setSavedLists(updated);
+    await AsyncStorage.setItem('@my_lists', JSON.stringify(updated));
+  };
 
   return (
     <View style={styles.container}>
-      {/* Search */}
+      {/* Header with History Access */}
+      <View style={styles.header}>
+        <Text style={styles.title}>SuperMatch</Text>
+        <TouchableOpacity onPress={loadSavedLists}>
+           <Text style={styles.historyBtn}>📜 Mis Listas</Text>
+        </TouchableOpacity>
+      </View>
+      {/* Search Row */}
       <View style={styles.searchRow}>
-        <TextInput
-          style={styles.input}
-          placeholder="Buscar producto..."
-          value={query}
-          onChangeText={setQuery}
-        />
-        <TouchableOpacity
-          style={styles.button}
-          onPress={handleSearch}
-        >
+        <TextInput style={styles.input} placeholder="Buscar producto..." value={query} onChangeText={setQuery} />
+        <TouchableOpacity style={styles.button} onPress={handleSearch}>
           <Text style={styles.buttonText}>Buscar</Text>
         </TouchableOpacity>
       </View>
 
       {/* Controls */}
       <View style={styles.controls}>
-        <TouchableOpacity
-          onPress={() => setFilterOpen(true)}
-        >
-          <Text style={styles.controlBtn}>Filtros</Text>
+        <TouchableOpacity onPress={() => setFilterOpen(true)}>
+          <Text style={styles.controlBtn}>Filtros ({selectedBrands.length + selectedStores.length})</Text>
         </TouchableOpacity>
-
-        <TouchableOpacity
-          onPress={() => setSortAsc(s => !s)}
-        >
-          <Text style={styles.controlBtn}>
-            Precio {sortAsc ? "⬆" : "⬇"}
-          </Text>
+        <TouchableOpacity onPress={() => setSortAsc(s => !s)}>
+          <Text style={styles.controlBtn}>Precio {sortAsc ? "⬆" : "⬇"}</Text>
         </TouchableOpacity>
       </View>
 
+      {/* Cart Summary Button */}
+      {cart.length > 0 && (
+        <TouchableOpacity style={styles.cartSummaryBanner} onPress={() => setIsListModalOpen(true)}>
+          <Text style={styles.buttonText}>📋 Ver Mi Lista ({cart.length}) - Total: ${totalCartPrice}</Text>
+        </TouchableOpacity>
+      )}
+
       {loading && (
         <View style={styles.loaderContainer}>
-          <ActivityIndicator size="large" color="#000" />
+          {/* <ActivityIndicator size="large" color="#000" /> */}
+          <HeartbeatLoader />
           <Text style={styles.statusMessage}>{statusMessage}</Text>
         </View>
       )}
+
       {error && <Text style={styles.error}>{error}</Text>}
 
       {/* Results */}
       <FlatList
         data={filtered}
         keyExtractor={(item) => item.url}
-        renderItem={({ item }) => {
-          const isCheapest =
-            item.price === cheapestPrice;
-
-          return (
-            <View
-              style={[
-                styles.card,
-                isCheapest && styles.cheapest,
-              ]}
-            >
-              <Text style={styles.name}>
-                {item.product_name}
-              </Text>
-              <Text>{item.brand}</Text>
-              <Text>{item.store}</Text>
-              <Text style={styles.price}>
-                ${item.price}
-              </Text>
-              {isCheapest && (
-                <Text style={styles.cheapestBadge}>
-                  🟢 Más barato
-                </Text>
+        ListEmptyComponent={() => (!loading && hasSearched ? (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyText}>No se encontraron productos</Text>
+          </View>
+        ) : null)}
+        renderItem={({ item }) => (
+          <View style={[styles.card, item.price === cheapestPrice && styles.cheapest]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.name}>{item.product_name}</Text>
+              <Text style={styles.subText}>{item.brand} | {item.store}</Text>
+              {item.promo_text && (
+                <View style={styles.promoBadge}><Text style={styles.promoText}>{item.promo_text}</Text></View>
               )}
+              <Text style={styles.price}>${item.price}</Text>
             </View>
-          );
-        }}
-      />
-
-      {/* ---------- Bottom Sheet Filters ---------- */}
-      <Modal
-        visible={filterOpen}
-        animationType="slide"
-        transparent
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.bottomSheet}>
-            <Text style={styles.sheetTitle}>
-              Filtros
-            </Text>
-
-            <Accordion
-              title="Marca"
-              open={brandAccordion}
-              onToggle={() =>
-                setBrandAccordion(o => !o)
-              }
-            >
-              {brandFilter.map(b => (
-                <Checkbox
-                  key={b}
-                  label={b}
-                  checked={selectedBrands.includes(b)}
-                  onToggle={() =>
-                    setSelectedBrands(prev =>
-                      prev.includes(b)
-                        ? prev.filter(x => x !== b)
-                        : [...prev, b]
-                    )
-                  }
-                />
-              ))}
-            </Accordion>
-
-            <Accordion
-              title="Tienda"
-              open={storeAccordion}
-              onToggle={() =>
-                setStoreAccordion(o => !o)
-              }
-            >
-              {storeFilter.map(s => (
-                <Checkbox
-                  key={s}
-                  label={s}
-                  checked={selectedStores.includes(s)}
-                  onToggle={() =>
-                    setSelectedStores(prev =>
-                      prev.includes(s)
-                        ? prev.filter(x => x !== s)
-                        : [...prev, s]
-                    )
-                  }
-                />
-              ))}
-            </Accordion>
-
-            <Accordion
-              title="Producto"
-              open={itemAccordion}
-              onToggle={() =>
-                setItemAccordion(o => !o)
-              }
-            >
-              {items.map(i => (
-                <Checkbox
-                  key={i}
-                  label={i}
-                  checked={selectedItems.includes(i)}
-                  onToggle={() =>
-                    setSelectedItems(prev =>
-                      prev.includes(i)
-                        ? prev.filter(x => x !== i)
-                        : [...prev, i]
-                    )
-                  }
-                />
-              ))}
-            </Accordion>
-
-            <TouchableOpacity
-              style={styles.closeBtn}
-              onPress={() => setFilterOpen(false)}
-            >
-              <Text style={styles.buttonText}>
-                Aplicar
-              </Text>
+            <TouchableOpacity style={styles.addBtn} onPress={() => addToCart(item)}>
+              <Text style={styles.addBtnText}>+ Añadir</Text>
             </TouchableOpacity>
           </View>
+        )}
+      />
+
+      {/* --- Filter Modal (Restored) --- */}
+      <Modal visible={filterOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.bottomSheet}>
+            <Text style={styles.sheetTitle}>Filtros</Text>
+            <ScrollView>
+              <Accordion title="Marca" open={brandAccordion} onToggle={() => setBrandAccordion(!brandAccordion)}>
+                {brandFilter.map(b => (
+                  <Checkbox key={b} label={b} checked={selectedBrands.includes(b)} onToggle={() => setSelectedBrands(prev => prev.includes(b) ? prev.filter(x => x !== b) : [...prev, b])} />
+                ))}
+              </Accordion>
+              <Accordion title="Tienda" open={storeAccordion} onToggle={() => setStoreAccordion(!storeAccordion)}>
+                {storeFilter.map(s => (
+                  <Checkbox key={s} label={s} checked={selectedStores.includes(s)} onToggle={() => setSelectedStores(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s])} />
+                ))}
+              </Accordion>
+            </ScrollView>
+            <TouchableOpacity style={styles.closeBtn} onPress={() => setFilterOpen(false)}>
+              <Text style={styles.buttonText}>Aplicar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- Shopping List Modal --- */}
+      {/* --- MODAL: SAVING LIST (Fixed Input) --- */}
+      <Modal visible={isListModalOpen} animationType="slide">
+        <View style={styles.listModal}>
+          <Text style={styles.sheetTitle}>Guardar Lista Actual</Text>
+          
+          {/* FIXED HEIGHT INPUT: Won't grow or shrink */}
+          <View style={styles.fixedInputContainer}>
+            <TextInput 
+              style={styles.fixedInput} 
+              placeholder="Nombre de la lista (ej: Compras Mes)" 
+              value={listName}
+              onChangeText={setListName}
+            />
+          </View>
+
+          <ScrollView style={styles.modalScroll}>
+            {Object.entries(groupedCart).map(([store, items]) => (
+              <View key={store} style={styles.storeGroup}>
+                <Text style={styles.storeHeader}>{store}</Text>
+                {items.map(item => (
+                  <View key={item.url} style={styles.cartItem}>
+                    <Text style={{ flex: 1 }}>{item.product_name} x{item.quantity}</Text>
+                    <TouchableOpacity onPress={() => removeFromCart(item.url)}>
+                      <Text style={{ color: 'red' }}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
+            ))}
+          </ScrollView>
+
+          <TouchableOpacity style={styles.saveBtn} onPress={saveListToDevice}>
+            <Text style={styles.buttonText}>Guardar en Memoria</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setIsListModalOpen(false)}>
+            <Text style={styles.closeText}>Cancelar</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+      {/* --- MODAL: HISTORY (Saved Lists) --- */}
+      <Modal visible={isHistoryOpen} animationType="slide">
+        <View style={styles.listModal}>
+          <Text style={styles.sheetTitle}>Historial de Listas</Text>
+          <FlatList
+            data={savedLists}
+            keyExtractor={item => item.id}
+            renderItem={({ item }) => (
+              <View style={styles.historyCard}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.historyName}>{item.name}</Text>
+                  <Text style={styles.historyMeta}>{item.date} • Total: ${item.total}</Text>
+                </View>
+                <TouchableOpacity onPress={() => deleteList(item.id)}>
+                  <Text style={{ color: 'red' }}>Borrar</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            ListEmptyComponent={<Text style={{ textAlign: 'center' }}>No tienes listas guardadas.</Text>}
+          />
+          <TouchableOpacity 
+            style={styles.closeBtnBlack} 
+            onPress={() => setIsHistoryOpen(false)}
+          >
+            <Text style={styles.buttonText}>Cerrar Historial</Text>
+          </TouchableOpacity>
         </View>
       </Modal>
     </View>
   );
 }
 
-/* ---------- Styles ---------- */
-
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
+  container: { flex: 1, padding: 16, paddingTop: 50, backgroundColor: '#fff' },
+  searchRow: { flexDirection: "row", marginBottom: 10 },
+  input: { flex: 1, borderWidth: 1, borderColor: "#ccc", padding: 10, borderRadius: 8 },
+  button: { marginLeft: 8, backgroundColor: "#000", paddingHorizontal: 16, justifyContent: "center", borderRadius: 8 },
+  buttonText: { color: "#fff", fontWeight: "bold" },
+  controls: { flexDirection: "row", justifyContent: "space-between", marginBottom: 10 },
+  controlBtn: { fontWeight: "bold", fontSize: 14 },
+  card: { padding: 15, borderBottomWidth: 1, borderColor: "#eee", flexDirection: 'row', alignItems: 'center' },
+  cheapest: { backgroundColor: "#eaffea" },
+  name: { fontWeight: "bold", fontSize: 14 },
+  subText: { color: '#666', fontSize: 12 },
+  price: { fontSize: 18, fontWeight: 'bold' },
+  addBtn: { backgroundColor: '#000', padding: 10, borderRadius: 6 },
+  addBtnText: { color: '#fff', fontSize: 12 },
+  cartSummaryBanner: { backgroundColor: '#28a745', padding: 15, borderRadius: 10, marginBottom: 15, alignItems: 'center' },
+  loaderContainer: { alignItems: 'center', marginVertical: 20 },
+  statusMessage: { color: '#888', fontStyle: 'italic', marginTop: 5 },
+  modalOverlay: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.3)" },
+  bottomSheet: { backgroundColor: "#fff", padding: 20, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '80%' },
+  listModal: { flex: 1, padding: 20, paddingTop: 60 },
+  sheetTitle: { fontSize: 20, fontWeight: "bold", marginBottom: 15 },
+  storeGroup: { backgroundColor: '#f8f8f8', padding: 10, borderRadius: 8, marginBottom: 10 },
+  storeHeader: { fontWeight: 'bold', borderBottomWidth: 1, borderColor: '#ddd', marginBottom: 5 },
+  cartItem: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
+  totalText: { fontSize: 20, fontWeight: 'bold', textAlign: 'right', marginBottom: 20 },
+  saveBtn: { backgroundColor: '#000', padding: 15, borderRadius: 8, alignItems: 'center' },
+  closeBtn: { backgroundColor: '#000', padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 10 },
+  closeText: { textAlign: 'center', marginTop: 20, color: '#999' },
+  promoBadge: { backgroundColor: "#fff0f0", paddingHorizontal: 6, borderRadius: 4, marginVertical: 2, alignSelf: 'flex-start' },
+  promoText: { color: "#d32f2f", fontSize: 10, fontWeight: "bold" },
+  accordion: { marginBottom: 10 },
+  accordionTitle: { fontWeight: "bold", paddingVertical: 5 },
+  checkboxRow: { flexDirection: "row", alignItems: "center", paddingVertical: 5 },
+  checkbox: { width: 18, height: 18, borderWidth: 1, marginRight: 10 },
+  checkboxChecked: { backgroundColor: "green" },
+  error: { color: 'red', textAlign: 'center' },
+  emptyContainer: { alignItems: 'center', marginTop: 50 },
+  emptyText: { color: '#999' },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15
+  },
+  title: { fontSize: 24, fontWeight: 'bold' },
+  historyBtn: { color: '#007AFF', fontWeight: 'bold' },
 
-  searchRow: {
-    flexDirection: "row",
+  // THE FIXED INPUT FIX
+  fixedInputContainer: {
+    height: 50, // Static height
     marginBottom: 10,
   },
-
-  input: {
-    flex: 1,
+  fixedInput: {
+    height: 45,
     borderWidth: 1,
     borderColor: "#ccc",
-    padding: 8,
-    borderRadius: 4,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: '#fff',
   },
 
-  button: {
-    marginLeft: 8,
-    backgroundColor: "#000",
-    paddingHorizontal: 16,
-    justifyContent: "center",
-    borderRadius: 4,
+  modalScroll: {
+    flex: 1, // Takes up remaining space without pushing the input
+    marginVertical: 10,
   },
 
-  buttonText: {
-    color: "#fff",
-    fontWeight: "bold",
-  },
-
-  controls: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 8,
-  },
-
-  controlBtn: {
-    fontWeight: "bold",
-  },
-
-  card: {
-    padding: 12,
-    borderBottomWidth: 1,
-    borderColor: "#eee",
-  },
-
-  cheapest: {
-    backgroundColor: "#eaffea",
-  },
-
-  cheapestBadge: {
-    color: "green",
-    fontWeight: "bold",
-  },
-
-  name: { fontWeight: "bold" },
-  price: { fontSize: 18 },
-
-  error: { color: "red", marginVertical: 8 },
-
-  modalOverlay: {
-    flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0,0,0,0.3)",
-  },
-
-  bottomSheet: {
-    backgroundColor: "#fff",
-    padding: 16,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    maxHeight: "80%",
-  },
-
-  sheetTitle: {
-    fontSize: 18,
-    fontWeight: "bold",
-    marginBottom: 8,
-  },
-
-  accordion: {
-    marginBottom: 12,
-  },
-
-  accordionTitle: {
-    fontWeight: "bold",
-    marginBottom: 6,
-  },
-
-  checkboxRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: 4,
-  },
-
-  checkbox: {
-    width: 18,
-    height: 18,
-    borderWidth: 1,
-    borderColor: "#333",
-    marginRight: 8,
-  },
-
-  checkboxChecked: {
-    backgroundColor: "#4CAF50",
-  },
-
-  closeBtn: {
-    backgroundColor: "#000",
-    padding: 12,
-    borderRadius: 6,
-    alignItems: "center",
-    marginTop: 12,
-  },
-
-  loaderContainer: {
-    marginVertical: 20,
+  // History Card Styles
+  historyCard: {
+    padding: 15,
+    backgroundColor: '#f9f9f9',
+    borderRadius: 10,
+    flexDirection: 'row',
     alignItems: 'center',
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#eee'
   },
-  
-  statusMessage: {
-    marginTop: 10,
-    color: '#666',
-    fontStyle: 'italic',
-  },
+  historyName: { fontWeight: 'bold', fontSize: 16 },
+  historyMeta: { color: '#666', fontSize: 12 },
+  closeBtnBlack: {
+    backgroundColor: '#000',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginTop: 10
+  }
 });
