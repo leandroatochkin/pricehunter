@@ -104,6 +104,9 @@ export default function HomeScreen() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [savedLists, setSavedLists] = useState<any[]>([]);
   const [location, setLocation] = useState<{city: string, province: string} | null>(null);
+  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [isSearchHistoryOpen, setIsSearchHistoryOpen] = useState(false);
+  const MAX_HISTORY = 20;
 
   async function getClientLocation() {
   let { status } = await Location.requestForegroundPermissionsAsync();
@@ -114,6 +117,68 @@ export default function HomeScreen() {
     latitude: location.coords.latitude,
     longitude: location.coords.longitude,
   };
+}
+
+// Load history on mount
+useEffect(() => {
+  loadSearchHistory();
+}, []);
+
+const loadSearchHistory = async () => {
+  try {
+    const saved = await AsyncStorage.getItem('@search_history');
+    if (saved) setSearchHistory(JSON.parse(saved));
+  } catch (e) { console.error("Error loading history", e); }
+};
+
+const saveToHistory = async (term: string) => {
+  const trimmedTerm = term.trim();
+  if (!trimmedTerm) return;
+
+  // Remove if term already exists (to bring it to top) and limit to 20
+  const filtered = searchHistory.filter(h => h.toLowerCase() !== trimmedTerm.toLowerCase());
+  const newHistory = [trimmedTerm, ...filtered].slice(0, MAX_HISTORY);
+  
+  setSearchHistory(newHistory);
+  await AsyncStorage.setItem('@search_history', JSON.stringify(newHistory));
+};
+
+const deleteHistoryItem = async (term: string) => {
+  const updated = searchHistory.filter(h => h !== term);
+  setSearchHistory(updated);
+  await AsyncStorage.setItem('@search_history', JSON.stringify(updated));
+};
+
+const clearAllHistory = async () => {
+  setSearchHistory([]);
+  await AsyncStorage.removeItem('@search_history');
+};
+
+const handleHistorySelect = (term: string) => {
+  setQuery(term);
+  setIsSearchHistoryOpen(false);
+  // We call handleSearch manually here or wrap handleSearch in a useCallback
+  // For now, let's just trigger it:
+  setTimeout(() => handleSearchWithTerm(term), 100); 
+};
+
+// Update your handleSearch to accept an optional term for history clicks
+async function handleSearchWithTerm(overrideTerm?: string) {
+  const searchTerm = overrideTerm || query;
+  if (searchTerm.length < 2) return;
+  
+  saveToHistory(searchTerm); // Save term to history
+  
+  const city = location?.city || "MAR_DEL_PLATA"; 
+  const province = location?.province || "BUENOS_AIRES";
+
+  setLoading(true); 
+  setError(null); 
+  setStatusMessage(`Buscando en ${city}...`);
+  setData([]); 
+  
+  await pollSearch(searchTerm, city, province);
+  setHasSearched(true);
 }
 
 // 1. Get location on Mount or before search
@@ -271,12 +336,26 @@ async function pollSearch(searchQuery: string, userCity: string, userProvince: s
         </TouchableOpacity>
       </View>
       {/* Search Row */}
-      <View style={styles.searchRow}>
-        <TextInput style={styles.input} placeholder="Buscar producto..." value={query} onChangeText={setQuery} />
-        <TouchableOpacity style={styles.button} onPress={handleSearch}>
-          <Text style={styles.buttonText}>Buscar</Text>
-        </TouchableOpacity>
-      </View>
+        <View style={styles.searchRow}>
+          <TouchableOpacity 
+            style={styles.historyIconButton} 
+            onPress={() => setIsSearchHistoryOpen(true)}
+          >
+            <Text style={{ fontSize: 20 }}>🕒</Text>
+          </TouchableOpacity>
+
+          <TextInput 
+            style={styles.input} 
+            placeholder="Buscar producto..." 
+            value={query} 
+            onChangeText={setQuery}
+            // Removed the automatic onFocus trigger to keep it manual
+          />
+
+          <TouchableOpacity style={styles.button} onPress={() => handleSearchWithTerm()}>
+            <Text style={styles.buttonText}>Buscar</Text>
+          </TouchableOpacity>
+        </View>
 
       {/* Controls */}
       <View style={styles.controls}>
@@ -423,13 +502,58 @@ async function pollSearch(searchQuery: string, userCity: string, userProvince: s
           </TouchableOpacity>
         </View>
       </Modal>
+
+      {/* --- MODAL: SEARCH HISTORY --- */}
+      <Modal visible={isSearchHistoryOpen} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.historyModalContent}>
+            <View style={styles.historyHeader}>
+              <Text style={styles.sheetTitle}>Búsquedas Recientes</Text>
+              <TouchableOpacity onPress={clearAllHistory}>
+                <Text style={{ color: 'red', fontWeight: 'bold' }}>Borrar todo</Text>
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              data={searchHistory}
+              keyExtractor={(item, index) => index.toString()}
+              renderItem={({ item }) => (
+                <View style={styles.historyItemRow}>
+                  <TouchableOpacity 
+                    style={{ flex: 1, paddingVertical: 12 }} 
+                    onPress={() => handleHistorySelect(item)}
+                  >
+                    <Text style={styles.historyText}>🔍 {item}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={styles.deleteItemBtn} 
+                    onPress={() => deleteHistoryItem(item)}
+                  >
+                    <Text style={{ color: '#ccc', fontSize: 18 }}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              ListEmptyComponent={
+                <Text style={styles.emptyText}>No hay búsquedas recientes</Text>
+              }
+            />
+
+            <TouchableOpacity 
+              style={styles.closeBtn} 
+              onPress={() => setIsSearchHistoryOpen(false)}
+            >
+              <Text style={styles.buttonText}>Cerrar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, paddingTop: 50, backgroundColor: '#fff' },
-  searchRow: { flexDirection: "row", marginBottom: 10 },
+  //searchRow: { flexDirection: "row", marginBottom: 10 },
   input: { flex: 1, borderWidth: 1, borderColor: "#ccc", padding: 10, borderRadius: 8 },
   button: { marginLeft: 8, backgroundColor: "#000", paddingHorizontal: 16, justifyContent: "center", borderRadius: 8 },
   buttonText: { color: "#fff", fontWeight: "bold" },
@@ -513,5 +637,51 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: 'center',
     marginTop: 10
-  }
+  },
+  historyModalContent: {
+    backgroundColor: "#fff",
+    margin: 20,
+    borderRadius: 20,
+    padding: 20,
+    maxHeight: '60%',
+    width: '90%',
+    alignSelf: 'center',
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  historyHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  historyItemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  historyText: {
+    fontSize: 16,
+    color: '#333',
+  },
+  deleteItemBtn: {
+    padding: 10,
+  },
+  searchRow: { 
+    flexDirection: "row", 
+    marginBottom: 10, 
+    alignItems: 'center' // Ensures button and input line up
+  },
+  historyIconButton: {
+    padding: 10,
+    marginRight: 5,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
 });
