@@ -6,6 +6,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { searchProduct } from "../api/client";
 import HeartbeatLoader from "../components/Loader";
+import * as Location from 'expo-location';
 
 /* ---------- Types ---------- */
 type Price = {
@@ -19,8 +20,45 @@ type Price = {
 
 type CartItem = Price & { quantity: number };
 
+interface Location {
+  city: string;
+  province: string;
+}
+
+interface SavedList {
+  id: string;
+  name: string;
+  items: CartItem[];
+  total: number;
+  date: string;
+}
+
+interface SearchResponse {
+  status: "STARTED" | "PROCESSING" | "COMPLETED";
+  message?: string;
+  results?: Price[];
+}
+
+interface ClientLocation {
+  latitude: number;
+  longitude: number;
+}
+
+interface CheckboxProps {
+  label: string;
+  checked: boolean;
+  onToggle: () => void;
+}
+
+interface AccordionProps {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}
+
 /* ---------- Small UI helpers (Your Checkbox/Accordion) ---------- */
-function Checkbox({ label, checked, onToggle }: { label: string; checked: boolean; onToggle: () => void }) {
+function Checkbox({ label, checked, onToggle }: CheckboxProps) {
   return (
     <Pressable onPress={onToggle} style={styles.checkboxRow}>
       <View style={[styles.checkbox, checked && styles.checkboxChecked]} />
@@ -65,6 +103,40 @@ export default function HomeScreen() {
   const [itemAccordion, setItemAccordion] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [savedLists, setSavedLists] = useState<any[]>([]);
+  const [location, setLocation] = useState<{city: string, province: string} | null>(null);
+
+  async function getClientLocation() {
+  let { status } = await Location.requestForegroundPermissionsAsync();
+  if (status !== 'granted') return null;
+
+  let location = await Location.getCurrentPositionAsync({});
+  return {
+    latitude: location.coords.latitude,
+    longitude: location.coords.longitude,
+  };
+}
+
+// 1. Get location on Mount or before search
+  useEffect(() => {
+    (async () => {
+      const loc = await getClientLocation();
+      if (loc) {
+        // Reverse Geocode the coordinates into City/Province
+        // You can use Expo's built-in reverseGeocodeAsync
+        const [address] = await Location.reverseGeocodeAsync({
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+        });
+
+        if (address) {
+          setLocation({
+            city: address.city || address.subregion || "Unknown",
+            province: address.region || "Unknown"
+          });
+        }
+      }
+    })();
+  }, []);
 
   /* ---------- Cart Logic ---------- */
   const addToCart = (product: Price) => {
@@ -105,35 +177,53 @@ export default function HomeScreen() {
 
   /* ---------- Polling Search Logic (Restored) ---------- */
  // React Native HomeScreen
-async function pollSearch(searchQuery: string) {
+async function pollSearch(searchQuery: string, userCity: string, userProvince: string) {
   try {
-    const response = await searchProduct(searchQuery);
+      // Pass location to the API so the backend can build the specific lock
+      const response = await searchProduct(searchQuery, userCity, userProvince);
 
-    if (response.status === "COMPLETED") {
-      setData(response.results || []);
-      setLoading(false);
-      setStatusMessage(null);
-    } 
-    else if (response.status === "STARTED" || response.status === "PROCESSING") {
-      setStatusMessage(response.message || "Buscando mejores precios...");
-      setTimeout(() => pollSearch(searchQuery), 4000); // Increased to 4s to be safer
-    }
-  } catch (err: any) {
+      if (response.status === "COMPLETED") {
+        const rawResults: Price[] = response.results || [];
+        
+        // Remove duplicates based on URL using typed parameters
+        const uniqueResults = rawResults.filter((item: Price, index: number, self: Price[]) =>
+          index === self.findIndex((t: Price) => t.url === item.url)
+        );
+
+        setData(uniqueResults);
+        setLoading(false);
+        setStatusMessage(null);
+      }
+      else if (response.status === "STARTED" || response.status === "PROCESSING") {
+        setStatusMessage(response.message || "Buscando mejores precios...");
+        setTimeout(() => pollSearch(searchQuery, userCity, userProvince), 4000);
+      }
+    } catch (err: any) {
     // If we hit a rate limit, don't show a red error, just wait longer
     if (err.message?.includes("Too many requests")) {
       setStatusMessage("Servidor ocupado, reintentando en breve...");
-      setTimeout(() => pollSearch(searchQuery), 10000); // Wait 10s if rate limited
+      setTimeout(() => pollSearch(searchQuery, userCity, userProvince), 10000); // Wait 10s if rate limited
     } else {
       setError(err.message || "Error de conexión");
       setLoading(false);
     }
   }
 }
+
   async function handleSearch() {
     if (query.length < 2) return;
-    setLoading(true); setError(null); setStatusMessage("Iniciando búsqueda...");
-    setData([]); setSelectedBrands([]); setSelectedStores([]); setSelectedItems([]);
-    await pollSearch(query);
+    
+    // Fallback if location permission was denied or still loading
+    const city = location?.city || "MAR_DEL_PLATA"; 
+    const province = location?.province || "BUENOS_AIRES";
+
+    setLoading(true); 
+    setError(null); 
+    setStatusMessage(`Buscando en ${city}...`);
+    setData([]); 
+    
+    // Start polling with location data
+    await pollSearch(query, city, province);
     setHasSearched(true);
   }
 
